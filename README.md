@@ -1,5 +1,7 @@
 # pi-anthropic-auth
 
+> Xo1otl fork: fixes Claude Code version rejection on message-thread continuations after tool calls.
+
 [![npm version](https://img.shields.io/npm/v/@gotgenes/pi-anthropic-auth?style=flat&logo=npm&logoColor=white)](https://www.npmjs.com/package/@gotgenes/pi-anthropic-auth)
 [![CI](https://img.shields.io/github/actions/workflow/status/gotgenes/pi-anthropic-auth/ci.yml?style=flat&logo=github&label=CI)](https://github.com/gotgenes/pi-anthropic-auth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat)](https://opensource.org/licenses/MIT)
@@ -30,13 +32,14 @@ Requires Pi 0.86.0 or newer.
 Pi 0.86.0 restructured its system prompt into XML-tagged sections, and this extension shapes that structure directly; the `2.x` line supports Pi 0.80.8 through 0.85.x.
 
 ```bash
-pi install npm:@gotgenes/pi-anthropic-auth
+pi remove npm:@gotgenes/pi-anthropic-auth
+pi install git:github.com/Xo1otl/pi-anthropic-auth
 ```
 
 To try it without permanently installing:
 
 ```bash
-pi -e npm:@gotgenes/pi-anthropic-auth
+pi -ne -e git:github.com/Xo1otl/pi-anthropic-auth
 ```
 
 ## Usage
@@ -177,17 +180,20 @@ details.error_code: claude_code_version_too_old
 
 This package reports a bundled Claude Code version in the OAuth billing header, and Anthropic gates on that value.
 The bundled version is a **floor**, not a fixed value: when the Pi you are running reports a newer Claude Code version in its own `user-agent`, this extension adopts it automatically for the billing header.
-So upgrading Pi is usually enough to reach a newly gated model.
+The extension also synchronizes Pi's `claude-cli` user-agent to this version.
+Pi omits `system` and its billing block on message-thread continuations, so Anthropic gates those tool-follow-up requests on the user-agent instead.
+Updating only the billing version is therefore insufficient.
 
 When Anthropic raises the floor faster than either Pi or this package ships, the extension recovers on its own.
-The rejection names the required version, so the extension rebuilds the billing header at that version and retries the request once.
+The rejection names the required version, so the extension synchronizes both version signals and retries the request once.
+When a continuation has no billing block, it retries the serialized body unchanged with the updated user-agent.
 It remembers that version for the rest of the session, so only the first request after a floor rise pays for the rejected attempt.
 
 If the error still reaches you, it ends with a `[pi-anthropic-auth]` hint saying what to do: raise or unset an override, set one, or upgrade Pi.
 To pin the version yourself:
 
 ```bash
-export PI_ANTHROPIC_AUTH_CLAUDE_CODE_VERSION=2.1.280
+export PI_ANTHROPIC_AUTH_CLAUDE_CODE_VERSION=2.1.322
 ```
 
 The value must be a bare `X.Y.Z` version; anything else fails fast with an explicit error.

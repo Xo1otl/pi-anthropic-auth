@@ -241,6 +241,249 @@ describe("createBillingVersionSync", () => {
 
 const MESSAGES_URL = "https://api.anthropic.com/v1/messages";
 const REQUIRED = "2.9.0";
+const CONTINUATION_BODY = JSON.stringify({
+  model: "claude-fable-5-2",
+  stream: true,
+  messages: [
+    {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tool_1", content: "OK" }],
+    },
+  ],
+  thread: { type: "continue", previous_message_id: "msg_1" },
+});
+
+function userAgentOfCall(base: CapturingFetch, index: number): string | null {
+  return new Headers(base.calls[index]?.init?.headers).get("user-agent");
+}
+
+describe("Claude Code user-agent synchronization", () => {
+  test("raises an older user-agent without changing other headers or body bytes", async () => {
+    const base = createCapturingFetch();
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    sync.recordRequest(shapedPayload());
+    const init = requestInit(
+      `extra/1.0 claude-cli/${PI_BEHIND} (external, cli)`,
+    );
+    const headers = new Headers(init.headers);
+    headers.set("x-request-marker", "preserved");
+
+    await sync.fetch(MESSAGES_URL, { ...init, headers });
+
+    assert.equal(
+      userAgentOfCall(base, 0),
+      `extra/1.0 claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`,
+    );
+    assert.equal(
+      new Headers(base.calls[0].init?.headers).get("x-request-marker"),
+      "preserved",
+    );
+    assert.equal(bodyOfCall(base, 0), init.body);
+    assert.equal(
+      headers.get("user-agent"),
+      `extra/1.0 claude-cli/${PI_BEHIND} (external, cli)`,
+    );
+  });
+
+  test("raises the user-agent on a thread continuation with no billing header", async () => {
+    const base = createCapturingFetch();
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    sync.recordRequest(shapedPayload());
+    const signal = new AbortController().signal;
+
+    await sync.fetch(MESSAGES_URL, {
+      ...requestInit(`claude-cli/${PI_BEHIND}`, CONTINUATION_BODY),
+      signal,
+    });
+
+    assert.equal(userAgentOfCall(base, 0), `claude-cli/${CLAUDE_CODE_VERSION}`);
+    assert.equal(bodyOfCall(base, 0), CONTINUATION_BODY);
+    assert.equal(base.calls[0].init?.signal, signal);
+    assert.equal(base.calls[0].init.method, "POST");
+  });
+
+  test("uses a learned floor even when the continuation body cannot be rebuilt", async () => {
+    const floor = createLearnedClaudeCodeFloor();
+    floor.learn(REQUIRED);
+    const base = createCapturingFetch();
+    const sync = createBillingVersionSync(floor, base.fetch);
+    sync.recordRequest(shapedPayload());
+
+    await sync.fetch(
+      MESSAGES_URL,
+      requestInit(`claude-cli/${PI_BEHIND}`, CONTINUATION_BODY),
+    );
+
+    assert.equal(userAgentOfCall(base, 0), `claude-cli/${REQUIRED}`);
+    assert.equal(bodyOfCall(base, 0), CONTINUATION_BODY);
+  });
+
+  test("an explicit override governs both version signals", async () => {
+    withVersionOverride("2.1.290");
+    const base = createCapturingFetch();
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    sync.recordRequest(shapedPayload());
+    const body = JSON.stringify(shapedPayload("2.1.290"));
+
+    await sync.fetch(MESSAGES_URL, requestInit(`claude-cli/${PI_AHEAD}`, body));
+
+    assert.equal(userAgentOfCall(base, 0), "claude-cli/2.1.290");
+    assert.equal(bodyOfCall(base, 0), body);
+  });
+
+  test("reads and preserves headers inherited from a Request", async () => {
+    const base = createCapturingFetch();
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    const input = new Request(MESSAGES_URL, {
+      headers: {
+        "user-agent": `claude-cli/${PI_BEHIND}`,
+        "x-request-marker": "preserved",
+      },
+    });
+
+    await sync.fetch(input, { method: "POST", body: CONTINUATION_BODY });
+
+    assert.equal(userAgentOfCall(base, 0), `claude-cli/${CLAUDE_CODE_VERSION}`);
+    assert.equal(
+      new Headers(base.calls[0].init?.headers).get("x-request-marker"),
+      "preserved",
+    );
+    assert.equal(input.headers.get("user-agent"), `claude-cli/${PI_BEHIND}`);
+  });
+
+  test("does not invent a claude-cli identity for an unknown user-agent", async () => {
+    for (const userAgent of [
+      undefined,
+      "other-client/1.0",
+      "notclaude-cli/2.1.1",
+      "claude-cli/2.1.1.9",
+    ]) {
+      const base = createCapturingFetch();
+      const sync = createBillingVersionSync(
+        createLearnedClaudeCodeFloor(),
+        base.fetch,
+      );
+      const init = requestInit(userAgent, CONTINUATION_BODY);
+
+      await sync.fetch(MESSAGES_URL, init);
+
+      assert.equal(base.calls[0].init, init);
+    }
+  });
+
+  test("updates the user-agent along with the billing header on recovery", async () => {
+    const base = createCapturingFetch([
+      claudeCodeVersionTooOldResponse(REQUIRED),
+      okResponse(),
+    ]);
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    sync.recordRequest(shapedPayload());
+
+    await sync.fetch(MESSAGES_URL, requestInit(`claude-cli/${PI_BEHIND}`));
+
+    assert.equal(base.calls.length, 2);
+    assert.equal(userAgentOfCall(base, 1), `claude-cli/${REQUIRED}`);
+    assert.equal(bodyOfCall(base, 1), JSON.stringify(shapedPayload(REQUIRED)));
+  });
+
+  test("recovers a version-gated continuation by changing only its user-agent", async () => {
+    const success = okResponse();
+    const base = createCapturingFetch([
+      claudeCodeVersionTooOldResponse(REQUIRED),
+      success,
+    ]);
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    sync.recordRequest(shapedPayload());
+
+    const response = await sync.fetch(
+      MESSAGES_URL,
+      requestInit(`claude-cli/${PI_BEHIND}`, CONTINUATION_BODY),
+    );
+
+    assert.equal(base.calls.length, 2);
+    assert.equal(response, success);
+    assert.equal(userAgentOfCall(base, 1), `claude-cli/${REQUIRED}`);
+    assert.equal(bodyOfCall(base, 1), CONTINUATION_BODY);
+  });
+
+  test("does not lower a learned user-agent on a rejection naming an older floor", async () => {
+    const floor = createLearnedClaudeCodeFloor();
+    floor.learn(PI_AHEAD);
+    const base = createCapturingFetch([
+      claudeCodeVersionTooOldResponse(REQUIRED),
+    ]);
+    const sync = createBillingVersionSync(floor, base.fetch);
+
+    const response = await sync.fetch(
+      MESSAGES_URL,
+      requestInit(`claude-cli/${PI_BEHIND}`, CONTINUATION_BODY),
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(base.calls.length, 1);
+    assert.equal(userAgentOfCall(base, 0), `claude-cli/${PI_AHEAD}`);
+    assert.equal(floor.applyTo(PI_BEHIND), PI_AHEAD);
+  });
+
+  test("does not retry an unverified non-string body using only a new user-agent", async () => {
+    const base = createCapturingFetch([
+      claudeCodeVersionTooOldResponse(REQUIRED),
+    ]);
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+    const body = new Uint8Array([1, 2, 3]);
+
+    const response = await sync.fetch(
+      MESSAGES_URL,
+      requestInit(`claude-cli/${PI_BEHIND}`, body),
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(base.calls.length, 1);
+    assert.equal(base.calls[0].init?.body, body);
+  });
+
+  test("retries a continuation no more than once", async () => {
+    const base = createCapturingFetch([
+      claudeCodeVersionTooOldResponse(REQUIRED),
+      claudeCodeVersionTooOldResponse(PI_AHEAD),
+    ]);
+    const sync = createBillingVersionSync(
+      createLearnedClaudeCodeFloor(),
+      base.fetch,
+    );
+
+    const response = await sync.fetch(
+      MESSAGES_URL,
+      requestInit(`claude-cli/${PI_BEHIND}`, CONTINUATION_BODY),
+    );
+
+    assert.equal(response.status, 400);
+    assert.equal(base.calls.length, 2);
+    assert.equal(userAgentOfCall(base, 1), `claude-cli/${REQUIRED}`);
+    assert.equal(bodyOfCall(base, 1), CONTINUATION_BODY);
+  });
+});
 
 /** Returns the string body the base fetch received on call `index`. */
 function bodyOfCall(base: CapturingFetch, index: number): string {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.4.4-xo1otl.1
+
+### Bug Fixes
+
+* Raise the bundled Claude Code version to 2.1.322.
+* Synchronize the OAuth user-agent with the billing version so Fable 5.2 tool-follow-up requests do not report Pi's stale 2.1.280 version.
+* Recover version-gated thread continuations by retrying their unchanged body with an updated user-agent.
+
 ## [3.4.4](https://github.com/gotgenes/pi-anthropic-auth/compare/v3.4.3...v3.4.4) (2026-11-01)
 
 

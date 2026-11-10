@@ -7,6 +7,7 @@ import {
   type LearnedClaudeCodeFloor,
   readClaudeCliVersion,
   resolveClaudeCodeVersion,
+  rewriteClaudeCliVersion,
 } from "./claude-code-version";
 import { debugLog } from "./debug";
 import {
@@ -27,8 +28,10 @@ import {
  *
  * The bundled pin is a *floor*: when Pi reports a higher version, the
  * billing header is rebuilt at Pi's version on the way out.  When Pi is at or
- * below the pin — pi-ai 0.86.0 and pi 0.87.0 both report 2.1.251 — the
- * request is sent exactly as shaping produced it.
+ * below the pin, the body is sent exactly as shaping produced it. The
+ * `claude-cli` user-agent is synchronized to the same version: Pi omits
+ * `system` on thread continuations, so those requests have no billing block
+ * and Anthropic gates them on the user-agent instead.
  *
  * When Anthropic raises a model's floor above both Pi and the pin, it rejects
  * the request as `claude_code_version_too_old` and names the floor (Issue
@@ -105,8 +108,11 @@ export function createBillingVersionSync(
     const target = targetVersion(readUserAgent(input, init));
     const upgraded =
       target === pinned ? undefined : rebuildBody(init?.body, pinned, target);
-    const sentInit =
-      upgraded === undefined ? init : { ...init, body: upgraded };
+    const sentInit = withClaudeCliVersion(
+      input,
+      upgraded === undefined ? init : { ...init, body: upgraded },
+      target,
+    );
     // When the upgrade could not be verified, the body still carries the pin.
     const sentVersion = upgraded === undefined ? pinned : target;
 
@@ -114,7 +120,12 @@ export function createBillingVersionSync(
     const rejection = await readVersionRejection(response);
     if (!rejection) return response;
 
-    const recovery = planRecovery(rejection, sentInit?.body, sentVersion);
+    const recovery = planRecovery(
+      rejection,
+      sentInit?.body,
+      sentVersion,
+      readUserAgent(input, sentInit),
+    );
     if (recovery.kind === "hint") {
       return hintedResponse(response, rejection, recovery.reason);
     }
@@ -124,7 +135,12 @@ export function createBillingVersionSync(
       requiredVersion: recovery.requiredVersion,
     });
     await response.body?.cancel();
-    const retried = await dispatch(input, { ...sentInit, body: recovery.body });
+    const retryInit = withClaudeCliVersion(
+      input,
+      { ...sentInit, body: recovery.body },
+      recovery.requiredVersion,
+    );
+    const retried = await dispatch(input, retryInit);
     const retryRejection = await readVersionRejection(retried);
     if (!retryRejection) return retried;
 
@@ -133,6 +149,7 @@ export function createBillingVersionSync(
       retryRejection,
       recovery.body,
       recovery.requiredVersion,
+      readUserAgent(input, retryInit),
     );
     return hintedResponse(
       retried,
@@ -155,6 +172,7 @@ export function createBillingVersionSync(
     rejection: ClaudeCodeVersionRejection,
     sentBody: BodyInit | null | undefined,
     sentVersion: string,
+    userAgent: string | undefined,
   ): Recovery {
     const required = rejection.requiredVersion;
     if (hasClaudeCodeVersionOverride()) {
@@ -169,13 +187,25 @@ export function createBillingVersionSync(
 
     learnedFloor.learn(required);
     const body = rebuildBody(sentBody, sentVersion, required);
-    if (body === undefined) {
+    // Continuations have no billing block. Their serialized body is replayable,
+    // so retry it byte-identically when the user-agent alone can be raised.
+    const reportedVersion = readClaudeCliVersion(userAgent);
+    const canRaiseUserAgent =
+      typeof sentBody === "string" &&
+      reportedVersion !== undefined &&
+      reportedVersion !== required &&
+      higherVersion(reportedVersion, required) === required;
+    if (body === undefined && !canRaiseUserAgent) {
       return hint({ kind: "set-override", requiredVersion: required });
     }
     if (higherVersion(sentVersion, required) === sentVersion) {
       return hint({ kind: "upgrade-pi", sentVersion });
     }
-    return { kind: "retry", body, requiredVersion: required };
+    return {
+      kind: "retry",
+      body: body ?? sentBody,
+      requiredVersion: required,
+    };
   }
 
   return {
@@ -208,7 +238,11 @@ async function readVersionRejection(
 
 /** What to do about a `claude_code_version_too_old` rejection. */
 type Recovery =
-  | { kind: "retry"; body: string; requiredVersion: string }
+  | {
+      kind: "retry";
+      body: BodyInit | null | undefined;
+      requiredVersion: string;
+    }
   | { kind: "hint"; reason: RecoveryHintReason };
 
 function hint(reason: RecoveryHintReason): Recovery {
@@ -237,6 +271,24 @@ async function hintedResponse(
     statusText: response.statusText,
     headers,
   });
+}
+
+/** Synchronizes only an existing Claude Code identity, preserving caller headers. */
+function withClaudeCliVersion(
+  input: Parameters<FetchFunction>[0],
+  init: RequestInit | undefined,
+  version: string,
+): RequestInit | undefined {
+  const userAgent = readUserAgent(input, init);
+  if (!userAgent) return init;
+  const rewritten = rewriteClaudeCliVersion(userAgent, version);
+  if (rewritten === userAgent) return init;
+
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
+  headers.set("user-agent", rewritten);
+  return { ...init, headers };
 }
 
 /** Reads the `user-agent` header off whichever argument carries it. */

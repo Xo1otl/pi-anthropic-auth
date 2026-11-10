@@ -14,8 +14,9 @@
 // a local install is frequently *below* the floor Anthropic requires for new
 // models.
 //
-// Known floors: claude-fable-5-1 requires >= 2.1.251; claude-opus-5-5
-// requires >= 2.1.280.  claude-sonnet-5-5 accepts 2.1.280 with no rejection
+// Known floors: claude-fable-5-1 requires >= 2.1.251; claude-fable-5-2
+// requires >= 2.1.290; claude-opus-5-5 requires >= 2.1.280.
+// claude-sonnet-5-5 accepts 2.1.280 with no rejection
 // (measured live on pi 0.99.1; no floor named).
 // ---------------------------------------------------------------------------
 
@@ -27,7 +28,7 @@
  * too far from what Anthropic expects, OAuth requests may be rejected or
  * counted incorrectly.
  */
-export const CLAUDE_CODE_VERSION = "2.1.280";
+export const CLAUDE_CODE_VERSION = "2.1.322";
 
 /**
  * Environment variable that overrides {@link CLAUDE_CODE_VERSION}.
@@ -103,6 +104,18 @@ export function readClaudeCliVersion(
     return undefined;
   }
   return CLAUDE_CLI_USER_AGENT_PATTERN.exec(userAgent)?.[1];
+}
+
+/** Rewrites a recognized Claude Code token without changing other user-agent text. */
+export function rewriteClaudeCliVersion(
+  userAgent: string,
+  version: string,
+): string {
+  return userAgent.replace(
+    CLAUDE_CLI_USER_AGENT_PATTERN,
+    (token: string, currentVersion: string) =>
+      token.replace(currentVersion, version),
+  );
 }
 
 /**

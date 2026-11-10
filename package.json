@@ -1,6 +1,6 @@
 {
   "name": "@gotgenes/pi-anthropic-auth",
-  "version": "3.4.4",
+  "version": "3.4.4-xo1otl.1",
   "description": "Pi extension package for Anthropic OAuth compatibility",
   "author": {
     "name": "Chris Lasher"
@@ -26,11 +26,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gotgenes/pi-anthropic-auth.git"
+    "url": "git+https://github.com/Xo1otl/pi-anthropic-auth.git"
   },
-  "homepage": "https://github.com/gotgenes/pi-anthropic-auth#readme",
+  "homepage": "https://github.com/Xo1otl/pi-anthropic-auth#readme",
   "bugs": {
-    "url": "https://github.com/gotgenes/pi-anthropic-auth/issues"
+    "url": "https://github.com/Xo1otl/pi-anthropic-auth/issues"
   },
   "engines": {
     "node": ">=22"
